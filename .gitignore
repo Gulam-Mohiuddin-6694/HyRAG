@@ -1,0 +1,29 @@
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*.class
+*.so
+
+# Environment Variables & Secret Files (CRITICAL!)
+.env
+*.env
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+
+# OS Generated Files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Data & Model Checkpoints (For future RAG data storage)
+data/
+storage/
+vector_db/
+logs/
