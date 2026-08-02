@@ -1,33 +1,39 @@
 """
-chunking.py - Document Chunking & Text Splitting Module for HyRAG.
+chunking.py - Token-Aware Document Chunking Engine for HyRAG.
 
 This module splits ingested page-level text into logically coherent chunks
-using Recursive Character Text Splitting while maintaining strict metadata lineage.
+using Token-Aware Recursive Character Text Splitting while maintaining strict metadata lineage.
 """
 
 import os
 from typing import List, Dict, Any
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from transformers import AutoTokenizer
 
 
-def create_text_splitter(
-    chunk_size: int = 1000, 
-    chunk_overlap: int = 150
+# Default Tokenizer & Parameters optimized for BAAI/bge-small-en-v1.5
+DEFAULT_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+DEFAULT_CHUNK_SIZE_TOKENS = 256
+DEFAULT_CHUNK_OVERLAP_TOKENS = 32
+
+
+def create_token_text_splitter(
+    model_name: str = DEFAULT_MODEL_NAME,
+    chunk_size: int = DEFAULT_CHUNK_SIZE_TOKENS, 
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP_TOKENS
 ) -> RecursiveCharacterTextSplitter:
     """
-    Creates and returns a RecursiveCharacterTextSplitter instance.
+    Creates and returns a Token-Aware RecursiveCharacterTextSplitter instance.
 
-    Separators priority:
-    1. "\n\n" (Paragraphs)
-    2. "\n"   (Lines)
-    3. " "    (Words)
-    4. ""     (Characters fallback)
+    Uses Hugging Face AutoTokenizer to measure text length in exact tokens
+    while preserving paragraph and sentence boundaries.
     """
-    return RecursiveCharacterTextSplitter(
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    return RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        tokenizer=tokenizer,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        length_function=len,
-        is_separator_regex=False,
         separators=["\n\n", "\n", " ", ""]
     )
 
@@ -52,7 +58,7 @@ def chunk_single_page(
     if not raw_text.strip():
         return []
 
-    # Split text into string chunks
+    # Split text into string chunks (measured in tokens)
     text_chunks = text_splitter.split_text(raw_text)
     
     doc_id = page_metadata.get("doc_id", "unknown_doc")
@@ -83,22 +89,22 @@ def chunk_single_page(
 
 def chunk_dataset(
     pages_list: List[Dict[str, Any]], 
-    chunk_size: int = 1000, 
-    chunk_overlap: int = 150
+    chunk_size: int = DEFAULT_CHUNK_SIZE_TOKENS, 
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP_TOKENS
 ) -> List[Dict[str, Any]]:
     """
-    Processes a complete dataset of ingested pages into text chunks.
+    Processes a complete dataset of ingested pages into token-aware text chunks.
 
     Args:
         pages_list (List[Dict[str, Any]]): List of page objects.
-        chunk_size (int): Max characters per chunk (default 1000).
-        chunk_overlap (int): Overlap in characters (default 150).
+        chunk_size (int): Max tokens per chunk (default 256 tokens).
+        chunk_overlap (int): Overlap in tokens (default 32 tokens).
 
     Returns:
         List[Dict[str, Any]]: Consolidated list of chunk objects across all documents.
     """
-    print(f"✂️  Starting chunking process (chunk_size={chunk_size}, overlap={chunk_overlap})...")
-    splitter = create_text_splitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    print(f"✂️  Starting Token-Aware chunking (chunk_size={chunk_size} tokens, overlap={chunk_overlap} tokens)...")
+    splitter = create_token_text_splitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     
     all_chunks = []
 
@@ -106,12 +112,11 @@ def chunk_dataset(
         page_chunks = chunk_single_page(page, splitter)
         all_chunks.extend(page_chunks)
 
-    print(f"✅ Chunking Complete: Processed {len(pages_list)} page(s) into {len(all_chunks)} chunk(s).")
+    print(f"✅ Token Chunking Complete: Processed {len(pages_list)} page(s) into {len(all_chunks)} chunk(s).")
     return all_chunks
 
 
 if __name__ == "__main__":
-    # Integration test with Phase 4 Ingestion Engine
     from src.ingestion import ingest_directory
 
     raw_docs_dir = os.path.join("data", "raw_documents")
@@ -119,8 +124,8 @@ if __name__ == "__main__":
         print("--- PHASE 4: INGESTION ---")
         pages = ingest_directory(raw_docs_dir)
 
-        print("\n--- PHASE 5: CHUNKING ---")
-        chunks = chunk_dataset(pages, chunk_size=1000, chunk_overlap=150)
+        print("\n--- PHASE 5 (UPGRADED): TOKEN-AWARE CHUNKING ---")
+        chunks = chunk_dataset(pages, chunk_size=256, chunk_overlap=32)
 
         if chunks:
             print("\n🔍 Sample Chunk Metadata (First chunk of dataset):")
