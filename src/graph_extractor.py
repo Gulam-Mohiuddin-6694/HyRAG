@@ -132,9 +132,38 @@ TEXT:
 
 JSON:"""
 
+    provider = os.getenv("LLM_PROVIDER", "groq").lower()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
+
     raw_response = ""
-    # Try Gemini
-    if gemini_key and gemini_key != "your_gemini_api_key_here":
+
+    # 1. Try Groq if configured
+    if provider == "groq" or (groq_key and "gsk_" in groq_key):
+        if groq_key and groq_key != "your_groq_api_key_here":
+            try:
+                from groq import Groq
+                client = Groq(api_key=groq_key)
+                groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+                
+                for g_model in groq_models:
+                    try:
+                        res = client.chat.completions.create(
+                            model=g_model,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.0
+                        )
+                        if res and res.choices:
+                            raw_response = res.choices[0].message.content.strip()
+                            if raw_response:
+                                break
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"Groq triplet extraction failed: {e}. Trying Gemini fallback...")
+
+    # 2. Try Gemini
+    if not raw_response and gemini_key and gemini_key != "your_gemini_api_key_here":
         try:
             from google import genai
             client = genai.Client(api_key=gemini_key)
@@ -142,23 +171,10 @@ JSON:"""
                 model="gemini-1.5-flash",
                 contents=prompt,
             )
-            raw_response = res.text.strip()
+            if res and res.text:
+                raw_response = res.text.strip()
         except Exception as e:
             logger.warning(f"Gemini triplet extraction failed: {e}")
-
-    # Try Groq fallback
-    if not raw_response and groq_key and groq_key != "your_groq_api_key_here":
-        try:
-            from groq import Groq
-            client = Groq(api_key=groq_key)
-            res = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
-            )
-            raw_response = res.choices[0].message.content.strip()
-        except Exception as e:
-            logger.warning(f"Groq triplet extraction failed: {e}")
 
     if not raw_response:
         return []

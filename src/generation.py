@@ -77,7 +77,7 @@ ANSWER WITH CITATIONS:"""
 
 def generate_llm_answer(prompt: str) -> str:
     """
-    Calls Google Gemini API (or Groq fallback) using free API credentials.
+    Calls configured LLM API (Groq / Gemini) using credentials from .env.
 
     Args:
         prompt (str): Grounded prompt string.
@@ -85,10 +85,34 @@ def generate_llm_answer(prompt: str) -> str:
     Returns:
         str: Generated LLM response text.
     """
+    load_dotenv()
+    provider = os.getenv("LLM_PROVIDER", "groq").lower()
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
 
-    # 1. Try Google Gemini API
+    # 1. Try Groq if provider is groq or if groq key is valid
+    if provider == "groq" or (groq_key and "gsk_" in groq_key):
+        if groq_key and groq_key != "your_groq_api_key_here":
+            try:
+                from groq import Groq
+                client = Groq(api_key=groq_key)
+                groq_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+                
+                for g_model in groq_models:
+                    try:
+                        response = client.chat.completions.create(
+                            model=g_model,
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.1
+                        )
+                        if response and response.choices:
+                            return response.choices[0].message.content.strip()
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"Groq API attempt failed: {e}. Trying Gemini fallback...")
+
+    # 2. Try Google Gemini API
     if gemini_key and gemini_key != "your_gemini_api_key_here":
         try:
             from google import genai
@@ -100,24 +124,10 @@ def generate_llm_answer(prompt: str) -> str:
             if response and response.text:
                 return response.text.strip()
         except Exception as e:
-            logger.warning(f"Gemini API attempt failed ({e}). Trying Groq fallback...")
-
-    # 2. Try Groq API Fallback
-    if groq_key and groq_key != "your_groq_api_key_here":
-        try:
-            from groq import Groq
-            client = Groq(api_key=groq_key)
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.warning(f"Groq API attempt failed: {e}")
+            logger.warning(f"Gemini API attempt failed: {e}")
 
     # Fallback if no valid API key is present
-    return "⚠️ Please set a valid GEMINI_API_KEY or GROQ_API_KEY in your .env file to enable live LLM generation."
+    return "⚠️ Please set a valid GROQ_API_KEY or GEMINI_API_KEY in your .env file to enable live LLM generation."
 
 
 def audit_hallucination_and_confidence(

@@ -1,95 +1,221 @@
 """
-ingestion.py - Document Ingestion Engine for HyRAG.
+ingestion.py - Multi-Format Document Ingestion Engine for HyRAG.
 
-This module provides utility functions to load, inspect, clean, and extract
-text along with metadata from enterprise PDF documents.
+Supports extracting text and metadata from enterprise documents:
+PDF, TXT, MD, DOCX, and CSV formats.
 """
 
 import os
+import csv
+import zipfile
+import xml.etree.ElementTree as ET
+import logging
 from typing import List, Dict, Any
 from pypdf import PdfReader
 
+logger = logging.getLogger("HyRAG.Ingestion")
+
+SUPPORTED_EXTENSIONS = {".pdf", ".txt", ".md", ".docx", ".csv"}
+
+
+def clean_text_whitespace(raw_text: str) -> str:
+    """Normalizes whitespace and removes null characters."""
+    if not raw_text:
+        return ""
+    return " ".join(raw_text.split())
+
+
+def create_doc_id(file_name: str) -> str:
+    """Generates a clean doc_id slug from a filename."""
+    base = os.path.splitext(file_name)[0]
+    clean = base.replace('-', '_').replace(' ', '_').replace('.', '_')
+    return f"doc_{clean.lower()}"
+
 
 def extract_text_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
-    """
-    Reads a single PDF file page by page and returns a list of dictionaries.
-    Each dictionary contains the extracted page text and its associated metadata.
-
-    Args:
-        pdf_path (str): Path to the PDF file.
-
-    Returns:
-        List[Dict[str, Any]]: List of pages with 'text' and 'metadata'.
-    """
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"PDF file not found at path: {pdf_path}")
-
+    """Reads a PDF page-by-page using pypdf."""
     reader = PdfReader(pdf_path)
     file_name = os.path.basename(pdf_path)
     total_pages = len(reader.pages)
-    
-    # Create a clean doc_id slug from filename
-    doc_id = f"doc_{file_name.replace('.pdf', '').replace('-', '_').replace(' ', '_')}"
+    doc_id = create_doc_id(file_name)
 
     extracted_pages = []
-
     for page_idx, page in enumerate(reader.pages):
         raw_text = page.extract_text() or ""
-        # Clean basic whitespace
-        cleaned_text = " ".join(raw_text.split())
+        cleaned = clean_text_whitespace(raw_text)
+        if cleaned:
+            extracted_pages.append({
+                "text": cleaned,
+                "metadata": {
+                    "doc_id": doc_id,
+                    "file_name": file_name,
+                    "file_path": os.path.abspath(pdf_path),
+                    "file_type": "PDF",
+                    "page_number": page_idx + 1,
+                    "total_pages": total_pages,
+                }
+            })
+    return extracted_pages
 
-        page_data = {
-            "text": cleaned_text,
+
+def extract_text_from_txt_or_md(file_path: str) -> List[Dict[str, Any]]:
+    """Reads a TXT or Markdown file."""
+    file_name = os.path.basename(file_path)
+    ext = os.path.splitext(file_name)[1].upper().replace(".", "")
+    doc_id = create_doc_id(file_name)
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except UnicodeDecodeError:
+        with open(file_path, "r", encoding="latin-1") as f:
+            content = f.read()
+
+    cleaned = clean_text_whitespace(content)
+    if not cleaned:
+        return []
+
+    return [{
+        "text": cleaned,
+        "metadata": {
+            "doc_id": doc_id,
+            "file_name": file_name,
+            "file_path": os.path.abspath(file_path),
+            "file_type": ext,
+            "page_number": 1,
+            "total_pages": 1,
+        }
+    }]
+
+
+def extract_text_from_docx(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Extracts text from a DOCX file by reading word/document.xml.
+    Requires no external dependencies beyond Python standard library.
+    """
+    file_name = os.path.basename(file_path)
+    doc_id = create_doc_id(file_name)
+
+    try:
+        with zipfile.ZipFile(file_path) as docx:
+            xml_content = docx.read('word/document.xml')
+        tree = ET.fromstring(xml_content)
+        
+        # Word XML namespace for text elements is w:t
+        namespaces = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        text_elements = tree.findall('.//w:t', namespaces)
+        raw_text = " ".join([elem.text for elem in text_elements if elem.text])
+        cleaned = clean_text_whitespace(raw_text)
+
+        if not cleaned:
+            return []
+
+        return [{
+            "text": cleaned,
             "metadata": {
                 "doc_id": doc_id,
                 "file_name": file_name,
-                "file_path": os.path.abspath(pdf_path),
-                "page_number": page_idx + 1,  # 1-based page index
-                "total_pages": total_pages,
+                "file_path": os.path.abspath(file_path),
+                "file_type": "DOCX",
+                "page_number": 1,
+                "total_pages": 1,
             }
-        }
-        extracted_pages.append(page_data)
+        }]
+    except Exception as e:
+        logger.error(f"Failed to extract text from DOCX '{file_path}': {e}")
+        return []
 
-    return extracted_pages
+
+def extract_text_from_csv(file_path: str) -> List[Dict[str, Any]]:
+    """Reads a CSV file and converts records into structured text passages."""
+    file_name = os.path.basename(file_path)
+    doc_id = create_doc_id(file_name)
+
+    rows_text = []
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            if headers:
+                for idx, row in enumerate(reader):
+                    row_pairs = [f"{headers[i]}: {val}" for i, val in enumerate(row) if i < len(headers) and val]
+                    if row_pairs:
+                        rows_text.append(f"[Record {idx+1}] " + ", ".join(row_pairs))
+            else:
+                for idx, row in enumerate(reader):
+                    rows_text.append(f"[Record {idx+1}] " + ", ".join(row))
+
+        full_text = clean_text_whitespace(" | ".join(rows_text))
+        if not full_text:
+            return []
+
+        return [{
+            "text": full_text,
+            "metadata": {
+                "doc_id": doc_id,
+                "file_name": file_name,
+                "file_path": os.path.abspath(file_path),
+                "file_type": "CSV",
+                "page_number": 1,
+                "total_pages": 1,
+            }
+        }]
+    except Exception as e:
+        logger.error(f"Failed to extract CSV '{file_path}': {e}")
+        return []
+
+
+def extract_text_from_file(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Dispatcher function to extract text from any supported file format:
+    PDF, TXT, MD, DOCX, CSV.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found at path: {file_path}")
+
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext == ".pdf":
+        return extract_text_from_pdf(file_path)
+    elif ext in (".txt", ".md"):
+        return extract_text_from_txt_or_md(file_path)
+    elif ext == ".docx":
+        return extract_text_from_docx(file_path)
+    elif ext == ".csv":
+        return extract_text_from_csv(file_path)
+    else:
+        raise ValueError(f"Unsupported file format '{ext}'. Supported: {SUPPORTED_EXTENSIONS}")
 
 
 def ingest_directory(dir_path: str) -> List[Dict[str, Any]]:
     """
-    Scans a directory for all PDF files and extracts text + metadata from each.
-
-    Args:
-        dir_path (str): Path to the directory containing PDFs.
-
-    Returns:
-        List[Dict[str, Any]]: Consolidated list of all extracted page objects.
+    Scans a directory for all supported files (PDF, TXT, MD, DOCX, CSV)
+    and extracts text + metadata from each.
     """
     if not os.path.exists(dir_path):
         raise FileNotFoundError(f"Directory not found: {dir_path}")
 
     all_documents = []
-    pdf_files = [f for f in os.listdir(dir_path) if f.lower().endswith(".pdf")]
+    files = [f for f in os.listdir(dir_path) if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS]
 
-    print(f"📁 Found {len(pdf_files)} PDF(s) in '{dir_path}' for ingestion.")
+    print(f"[HyRAG] Found {len(files)} document(s) in '{dir_path}' for ingestion.")
 
-    for pdf_file in pdf_files:
-        full_path = os.path.join(dir_path, pdf_file)
-        pages = extract_text_from_pdf(full_path)
-        all_documents.extend(pages)
-        print(f"   ✓ Ingested '{pdf_file}': {len(pages)} page(s).")
+    for doc_file in files:
+        full_path = os.path.join(dir_path, doc_file)
+        try:
+            pages = extract_text_from_file(full_path)
+            all_documents.extend(pages)
+            print(f"   ✓ Ingested '{doc_file}': {len(pages)} page(s).")
+        except Exception as e:
+            print(f"   ❌ Failed to ingest '{doc_file}': {e}")
 
     return all_documents
 
 
 if __name__ == "__main__":
-    # Test script locally when run directly
     raw_docs_dir = os.path.join("data", "raw_documents")
     try:
         docs = ingest_directory(raw_docs_dir)
-        print(f"\n✅ Total pages ingested across all PDFs: {len(docs)}")
-        if docs:
-            print("\n🔍 Sample Page Metadata (Page 1 of first doc):")
-            print(docs[0]["metadata"])
-            print("\n📝 Sample Text Snippet (First 200 chars):")
-            print(docs[0]["text"][:200] + "...")
+        print(f"\nTotal pages ingested across all files: {len(docs)}")
     except Exception as e:
-        print(f"❌ Error during ingestion test: {e}")
+        print(f"Error during ingestion test: {e}")

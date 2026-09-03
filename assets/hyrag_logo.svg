@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 90" width="100%" height="100%">
+  <defs>
+    <linearGradient id="hyragGradOrange" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFB800" />
+      <stop offset="100%" stop-color="#FF7A00" />
+    </linearGradient>
+    <linearGradient id="hyragGradBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00C0F3" />
+      <stop offset="100%" stop-color="#006699" />
+    </linearGradient>
+    <filter id="hyragGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#FF9900" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Logo Icon: Tri-Hybrid Connected Graph Nodes -->
+  <g transform="translate(10, 10)">
+    <!-- Node Connectors (Graph Edges) -->
+    <line x1="35" y1="18" x2="16" y2="52" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round" />
+    <line x1="35" y1="18" x2="54" y2="52" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round" />
+    <line x1="16" y1="52" x2="54" y2="52" stroke="#CBD5E1" stroke-width="3" stroke-linecap="round" />
+    
+    <!-- Pulse Ring around central node -->
+    <circle cx="35" cy="35" r="24" fill="none" stroke="#FF9900" stroke-width="1.5" stroke-dasharray="3 3" opacity="0.6"/>
+
+    <!-- Left Node: Dense Vector (Blue) -->
+    <circle cx="16" cy="52" r="10" fill="url(#hyragGradBlue)" />
+    <circle cx="16" cy="52" r="4" fill="#FFFFFF" />
+
+    <!-- Right Node: BM25 Sparse (Blue) -->
+    <circle cx="54" cy="52" r="10" fill="url(#hyragGradBlue)" />
+    <circle cx="54" cy="52" r="4" fill="#FFFFFF" />
+
+    <!-- Top Center Node: Knowledge Graph Apex (Orange) -->
+    <circle cx="35" cy="18" r="12" fill="url(#hyragGradOrange)" filter="url(#hyragGlow)" />
+    <circle cx="35" cy="18" r="5" fill="#FFFFFF" />
+
+    <!-- Center Core Hub: Hallucination-Aware Fusion -->
+    <circle cx="35" cy="35" r="7" fill="#232F3E" stroke="#FF9900" stroke-width="2"/>
+  </g>
+
+  <!-- Brand Typography -->
+  <g transform="translate(85, 20)">
+    <!-- "HyRAG" Wordmark -->
+    <text x="0" y="32" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="34" font-weight="900" fill="#232F3E" letter-spacing="-0.8">Hy<tspan fill="#FF9900">RAG</tspan></text>
+    
+    <!-- Enterprise Tagline / Subtitle Pill -->
+    <rect x="0" y="42" width="220" height="18" rx="4" fill="#F1F5F9" />
+    <text x="8" y="55" font-family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9.5" font-weight="700" fill="#64748B" letter-spacing="0.8">ENTERPRISE GRAPH RAG</text>
+  </g>
+</svg>
