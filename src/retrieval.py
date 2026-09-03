@@ -1,20 +1,25 @@
 """
-retrieval.py - Sparse BM25 & Reciprocal Rank Fusion (RRF) Hybrid Retrieval Engine.
+retrieval.py - Tri-Hybrid Retrieval Engine (Dense FAISS + Sparse BM25 + Graph RAG).
 
 This module implements BM25 keyword search, FAISS dense search integration,
-and Reciprocal Rank Fusion (RRF) for hallucination-aware hybrid retrieval.
+Graph RAG multi-hop retrieval, and Tri-Hybrid Reciprocal Rank Fusion (RRF).
 """
 
 import os
 import json
 import re
-from typing import List, Dict, Any, Tuple
+import logging
+from typing import List, Dict, Any, Tuple, Optional
 import numpy as np
 import faiss
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 from src.embeddings import load_embedding_model, search_faiss_index
+from src.graph_store import BaseGraphStore
+from src.graph_retrieval import search_knowledge_graph
+
+logger = logging.getLogger("HyRAG.Retrieval")
 
 
 def tokenize_text(text: str) -> List[str]:
@@ -80,57 +85,60 @@ def search_bm25(
 def reciprocal_rank_fusion(
     dense_results: List[Dict[str, Any]], 
     sparse_results: List[Dict[str, Any]], 
+    graph_results: Optional[List[Dict[str, Any]]] = None,
     k: int = 60,
-    top_k: int = 5
+    top_k: int = 5,
+    w_dense: float = 1.0,
+    w_sparse: float = 1.0,
+    w_graph: float = 1.2
 ) -> List[Dict[str, Any]]:
     """
-    Combines dense FAISS results and sparse BM25 results using Reciprocal Rank Fusion (RRF).
+    Combines dense FAISS, sparse BM25, and Graph-derived chunks using
+    Tri-Hybrid Reciprocal Rank Fusion (RRF).
 
-    Formula: RRF_Score(d) = 1 / (k + rank_dense(d)) + 1 / (k + rank_sparse(d))
+    Formula: RRF(d) = w_dense/(k + rank_dense) + w_sparse/(k + rank_sparse) + w_graph/(k + rank_graph)
 
     Args:
-        dense_results (List[Dict[str, Any]]): Ranked search results from FAISS.
-        sparse_results (List[Dict[str, Any]]): Ranked search results from BM25.
-        k (int): RRF smoothing constant (default 60).
-        top_k (int): Number of top hybrid results to return (default 5).
+        dense_results: Ranked search results from FAISS.
+        sparse_results: Ranked search results from BM25.
+        graph_results: Optional ranked search results from Graph RAG.
+        k: RRF smoothing constant (default 60).
+        top_k: Number of top hybrid results to return (default 5).
+        w_dense: Weight for dense vector retrieval.
+        w_sparse: Weight for sparse BM25 retrieval.
+        w_graph: Weight for graph evidence chunks.
 
     Returns:
         List[Dict[str, Any]]: Deduplicated hybrid search results sorted by RRF score.
     """
     rrf_map: Dict[str, Dict[str, Any]] = {}
 
-    # Process Dense FAISS Rankings
-    for rank, chunk in enumerate(dense_results):
-        chunk_id = chunk["chunk_id"]
-        dense_rank = rank + 1  # 1-based rank
-        score = 1.0 / (k + dense_rank)
+    def _add_source(results_list: List[Dict[str, Any]], rank_key: str, weight: float):
+        for rank, chunk in enumerate(results_list):
+            chunk_id = chunk["chunk_id"]
+            pos_rank = rank + 1  # 1-based rank
+            score = weight / (k + pos_rank)
 
-        if chunk_id not in rrf_map:
-            rrf_map[chunk_id] = {
-                "chunk": chunk.copy(),
-                "rrf_score": 0.0,
-                "dense_rank": dense_rank,
-                "sparse_rank": None
-            }
-        rrf_map[chunk_id]["rrf_score"] += score
-
-    # Process Sparse BM25 Rankings
-    for rank, chunk in enumerate(sparse_results):
-        chunk_id = chunk["chunk_id"]
-        sparse_rank = rank + 1  # 1-based rank
-        score = 1.0 / (k + sparse_rank)
-
-        if chunk_id not in rrf_map:
-            rrf_map[chunk_id] = {
-                "chunk": chunk.copy(),
-                "rrf_score": 0.0,
-                "dense_rank": None,
-                "sparse_rank": sparse_rank
-            }
+            if chunk_id not in rrf_map:
+                rrf_map[chunk_id] = {
+                    "chunk": chunk.copy(),
+                    "rrf_score": 0.0,
+                    "dense_rank": None,
+                    "sparse_rank": None,
+                    "graph_rank": None
+                }
+            rrf_map[chunk_id][rank_key] = pos_rank
             rrf_map[chunk_id]["rrf_score"] += score
-        else:
-            rrf_map[chunk_id]["sparse_rank"] = sparse_rank
-            rrf_map[chunk_id]["rrf_score"] += score
+
+    # Process Dense FAISS
+    _add_source(dense_results, "dense_rank", w_dense)
+
+    # Process Sparse BM25
+    _add_source(sparse_results, "sparse_rank", w_sparse)
+
+    # Process Graph Supporting Chunks (if provided)
+    if graph_results:
+        _add_source(graph_results, "graph_rank", w_graph)
 
     # Sort merged results by RRF score descending
     sorted_items = sorted(rrf_map.values(), key=lambda item: item["rrf_score"], reverse=True)
@@ -141,61 +149,79 @@ def reciprocal_rank_fusion(
         res_chunk["rrf_score"] = item["rrf_score"]
         res_chunk["dense_rank"] = item["dense_rank"]
         res_chunk["sparse_rank"] = item["sparse_rank"]
+        res_chunk["graph_rank"] = item["graph_rank"]
         hybrid_results.append(res_chunk)
 
     return hybrid_results
 
 
-if __name__ == "__main__":
-    # Integration Test: Ingestion -> Chunking -> FAISS + BM25 -> Hybrid RRF
-    raw_docs_dir = os.path.join("data", "raw_documents")
-    storage_dir = os.path.join("storage", "faiss_index")
-    
-    try:
-        print("--- LOADING PRE-INDEXED FAISS & CHUNKS METADATA ---")
-        index_path = os.path.join(storage_dir, "index.faiss")
-        metadata_path = os.path.join(storage_dir, "chunks_metadata.json")
+def tri_hybrid_search(
+    query: str,
+    model: SentenceTransformer,
+    faiss_index: faiss.IndexFlatIP,
+    bm25_index: BM25Okapi,
+    chunks: List[Dict[str, Any]],
+    graph_store: Optional[BaseGraphStore] = None,
+    top_k_chunks: int = 5,
+    rrf_k: int = 60,
+    max_hops: int = 2,
+    min_relation_confidence: float = 0.60
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Executes full Tri-Hybrid Retrieval (Vector + Keyword + Graph RAG).
 
-        if not os.path.exists(index_path) or not os.path.exists(metadata_path):
-            raise FileNotFoundError("FAISS index files not found. Run 'python -m src.embeddings' first!")
+    Returns:
+        Tuple:
+            - List[Dict[str, Any]]: Ranked top hybrid chunks with fusion metadata.
+            - Dict[str, Any]: Graph search outcome (seed entities, subgraph, facts, supporting chunks).
+    """
+    chunk_map = {c["chunk_id"]: c for c in chunks}
 
-        faiss_index = faiss.read_index(index_path)
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
+    # 1. Dense Vector Search
+    dense_results = search_faiss_index(query, model, faiss_index, chunks, top_k=10)
 
-        model = load_embedding_model()
+    # 2. Sparse BM25 Search
+    sparse_results = search_bm25(query, bm25_index, chunks, top_k=10)
 
-        print("\n--- BUILDING BM25 SPARSE INDEX ---")
-        bm25, corpus = build_bm25_index(chunks)
+    # 3. Graph RAG Search
+    graph_res = {
+        "seed_entities": [],
+        "subgraph": {"nodes": [], "edges": [], "supporting_chunk_ids": [], "paths": []},
+        "supporting_chunk_ids": [],
+        "facts_summary": ""
+    }
+    graph_chunk_results: List[Dict[str, Any]] = []
 
-        # Step 8 Verification: Compare FAISS, BM25, and Hybrid RRF on Enterprise Queries!
-        test_queries = [
-            "Section 2.2.2 Stockholder-Demanded Special Meetings",
-            "What is AWS Identity and Access Management MFA policy?",
-            "What is Amazon policy on employee conflict of interest?"
-        ]
+    if graph_store is not None:
+        try:
+            graph_res = search_knowledge_graph(
+                query=query,
+                graph_store=graph_store,
+                embedding_model=model,
+                max_hops=max_hops,
+                min_relation_confidence=min_relation_confidence
+            )
 
-        for q in test_queries:
-            print(f"\n========================================================")
-            print(f"❓ TEST QUERY: '{q}'")
-            print(f"========================================================")
+            # Map graph supporting chunk IDs to full chunk objects
+            for cid in graph_res.get("supporting_chunk_ids", []):
+                if cid in chunk_map:
+                    g_chunk = chunk_map[cid].copy()
+                    g_chunk["is_graph_provenance"] = True
+                    graph_chunk_results.append(g_chunk)
 
-            # 1. FAISS Search
-            dense_res = search_faiss_index(q, model, faiss_index, chunks, top_k=5)
-            
-            # 2. BM25 Search
-            sparse_res = search_bm25(q, bm25, chunks, top_k=5)
-            
-            # 3. Hybrid RRF Fusion
-            hybrid_res = reciprocal_rank_fusion(dense_res, sparse_res, k=60, top_k=3)
+        except Exception as e:
+            logger.error(f"Graph RAG search encountered error, falling back gracefully: {e}")
 
-            print(f"\n🏆 TOP 3 HYBRID (RRF) RESULTS:")
-            for rank, h in enumerate(hybrid_res):
-                d_rank = f"#{h['dense_rank']}" if h['dense_rank'] else "N/A"
-                s_rank = f"#{h['sparse_rank']}" if h['sparse_rank'] else "N/A"
-                print(f"   Rank #{rank+1} | RRF Score: {h['rrf_score']:.6f} | (FAISS: {d_rank}, BM25: {s_rank})")
-                print(f"   Source: {h['metadata']['file_name']} (Page {h['metadata']['page_number']}) | Chunk ID: {h['chunk_id']}")
-                print(f"   Text Snippet: {h['text'][:200]}...\n")
+    # 4. Tri-Hybrid Reciprocal Rank Fusion
+    hybrid_chunks = reciprocal_rank_fusion(
+        dense_results=dense_results,
+        sparse_results=sparse_results,
+        graph_results=graph_chunk_results if graph_chunk_results else None,
+        k=rrf_k,
+        top_k=top_k_chunks,
+        w_dense=1.0,
+        w_sparse=1.0,
+        w_graph=1.25
+    )
 
-    except Exception as e:
-        print(f"❌ Error during hybrid retrieval test: {e}")
+    return hybrid_chunks, graph_res

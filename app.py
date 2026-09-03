@@ -1,7 +1,7 @@
 """
-app.py - Exact Compact Enterprise UI for HyRAG with Top Navigation Bar Logo.
+app.py - Enterprise UI for HyRAG: Hybrid Graph Retrieval-Augmented Generation Console.
 
-HyRAG: Hallucination-Aware Enterprise Knowledge Assistant.
+HyRAG: Hallucination-Aware Enterprise Knowledge Assistant with Vector + BM25 + Graph RAG.
 """
 
 import os
@@ -14,8 +14,10 @@ from dotenv import load_dotenv
 
 # Import HyRAG Backend Modules
 from src.embeddings import load_embedding_model, search_faiss_index
-from src.retrieval import build_bm25_index, search_bm25, reciprocal_rank_fusion
+from src.retrieval import build_bm25_index, search_bm25, reciprocal_rank_fusion, tri_hybrid_search
 from src.generation import build_grounded_prompt, generate_llm_answer, audit_hallucination_and_confidence
+from src.graph_store import NetworkXGraphStore
+from src.conflict_detector import detect_graph_conflicts, format_conflict_prompt_notice
 
 # Load Environment Variables (.env)
 load_dotenv()
@@ -238,6 +240,12 @@ st.markdown("""
         border-radius: 2px;
         margin-top: 6px;
     }
+    .progress-bar-orange {
+        height: 3px;
+        background-color: #FF9900;
+        border-radius: 2px;
+        margin-top: 6px;
+    }
 
     /* Verified Answer Card */
     .answer-card {
@@ -251,6 +259,23 @@ st.markdown("""
         line-height: 1.5;
         color: #232F3E;
         box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+    }
+
+    /* Graph Facts Container */
+    .graph-evidence-card {
+        background-color: #F8FAFC;
+        border: 1px solid #E2E8F0;
+        border-left: 4px solid #146EB4;
+        border-radius: 8px;
+        padding: 14px 18px;
+        margin-top: 10px;
+        margin-bottom: 16px;
+    }
+    .graph-path-item {
+        font-family: monospace;
+        font-size: 13px;
+        color: #1E293B;
+        padding: 4px 0;
     }
 
     /* Sources Row Item */
@@ -312,6 +337,15 @@ def get_cached_bm25_index(_chunks):
     return bm25
 
 
+@st.cache_resource(show_spinner=False)
+def get_cached_graph_store():
+    graph_path = os.path.join("storage", "graph_store", "knowledge_graph.json")
+    graph_store = NetworkXGraphStore()
+    if os.path.exists(graph_path):
+        graph_store.load(graph_path)
+    return graph_store
+
+
 # --- TOP BAR (COMPACT HEADER WITH LOGO) ---
 logo_header_html = f'<img src="data:image/jpeg;base64,{logo_b64}" class="top-logo-img" />' if logo_b64 else '<span style="font-size: 20px; font-weight: 800; color: #232F3E;">HyRAG</span>'
 
@@ -325,10 +359,10 @@ with col_tb1:
     """, unsafe_allow_html=True)
 
 with col_tb2:
-    st.markdown('<div class="model-pill">⚙️ Groq (Llama-3.3-70B)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="model-pill">⚙️ Hybrid Graph RAG</div>', unsafe_allow_html=True)
 
 
-# --- SIDEBAR (EMBEDDED OFFICIAL LOGO IMAGE) ---
+# --- SIDEBAR ---
 with st.sidebar:
     if os.path.exists("logo.jpg"):
         st.image("logo.jpg", use_container_width=True)
@@ -341,20 +375,21 @@ with st.sidebar:
 
     # Navigation Menu
     st.markdown('<div class="nav-active">🏠 Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="nav-item">🕸️ Knowledge Graph</div>', unsafe_allow_html=True)
     st.markdown('<div class="nav-item">🕒 Query History</div>', unsafe_allow_html=True)
-    st.markdown('<div class="nav-item">📚 Knowledge Base</div>', unsafe_allow_html=True)
     st.markdown('<div class="nav-item">⚙️ Settings</div>', unsafe_allow_html=True)
     st.markdown('<div class="nav-item">📄 Audit Logs</div>', unsafe_allow_html=True)
-    st.markdown('<div class="nav-item">ℹ️ About</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
     # Knowledge Base Section
     st.markdown("<h5 style='font-size: 11px; font-weight: 700; color: #64748B; text-transform: uppercase;'>KNOWLEDGE BASE</h5>", unsafe_allow_html=True)
     faiss_index, chunks = get_cached_faiss_and_metadata()
+    graph_store = get_cached_graph_store()
+    g_stats = graph_store.stats() if graph_store else {"total_nodes": 0, "total_edges": 0}
     
     if faiss_index is not None:
-        st.markdown("<p style='font-size: 12px; color: #10B981; font-weight: 600;'>🟢 Connected to Index</p>", unsafe_allow_html=True)
+        st.markdown("<p style='font-size: 12px; color: #10B981; font-weight: 600;'>🟢 Tri-Hybrid Connected</p>", unsafe_allow_html=True)
         st.markdown(f"""
         <div class="kb-card">
             <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
@@ -363,42 +398,50 @@ with st.sidebar:
                     <div style="font-size: 16px; font-weight: 800; color: #232F3E;">{len(chunks):,}</div>
                 </div>
                 <div>
-                    <div style="font-size: 10px; color: #64748B;">Corpus</div>
-                    <div style="font-size: 16px; font-weight: 800; color: #232F3E;">5 PDFs</div>
+                    <div style="font-size: 10px; color: #64748B;">Graph Entities</div>
+                    <div style="font-size: 16px; font-weight: 800; color: #232F3E;">{g_stats.get('total_nodes', 0):,}</div>
                 </div>
             </div>
-            <div style="font-size: 11px; color: #64748B;">Total Pages: 1,406</div>
+            <div style="font-size: 11px; color: #64748B;">Graph Relations: <b>{g_stats.get('total_edges', 0):,}</b></div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.error("Index Missing")
+        st.warning("⚠️ Index not found. Run 'python build_graph.py' to generate initial vector & graph indexes.")
+        if st.button("🔨 Build Index Now"):
+            with st.spinner("Building vector & graph indexes..."):
+                import subprocess
+                res = subprocess.run(["python", "build_graph.py"], capture_output=True, text=True)
+                st.write(res.stdout)
+                st.rerun()
         st.stop()
 
     st.markdown("---")
 
     # Architecture Section
     st.markdown("<h5 style='font-size: 11px; font-weight: 700; color: #64748B; text-transform: uppercase;'>ARCHITECTURE</h5>", unsafe_allow_html=True)
-    st.caption("Embedding Model")
+    st.caption("Embedding Engine")
     st.markdown('<div class="arch-badge">BAAI/bge-small-en-v1.5</div>', unsafe_allow_html=True)
     
-    st.caption("LLM (Groq)")
-    st.markdown('<div class="arch-badge">Llama-3.3-70B</div>', unsafe_allow_html=True)
+    st.caption("Knowledge Graph Engine")
+    st.markdown('<div class="arch-badge">NetworkX + Provenance JSON</div>', unsafe_allow_html=True)
     
-    st.caption("Fusion Engine")
-    st.markdown('<div class="arch-badge">Reciprocal Rank Fusion</div>', unsafe_allow_html=True)
+    st.caption("Fusion Strategy")
+    st.markdown('<div class="arch-badge">Tri-Hybrid RRF (Dense+BM25+Graph)</div>', unsafe_allow_html=True)
 
     st.markdown("---")
 
     # Hyperparameters Section
     st.markdown("<h5 style='font-size: 11px; font-weight: 700; color: #64748B; text-transform: uppercase;'>HYPERPARAMETERS</h5>", unsafe_allow_html=True)
-    top_k_chunks = st.slider("Top-K Depth", min_value=1, max_value=10, value=3)
+    top_k_chunks = st.slider("Top-K Depth", min_value=1, max_value=10, value=4)
     rrf_k_const = st.slider("RRF Constant (k)", min_value=10, max_value=200, value=60)
+    max_hops = st.slider("Graph Max Hops", min_value=1, max_value=3, value=2)
+    min_confidence = st.slider("Min Edge Confidence", min_value=0.0, max_value=1.0, value=0.60, step=0.05)
 
     st.markdown("---")
     st.markdown("""
     <div style="background-color: #F8FAFC; border: 1px solid #E5E7EB; border-radius: 6px; padding: 8px;">
         <div style="font-size: 12px; font-weight: 600; color: #10B981;">🟢 System Status</div>
-        <div style="font-size: 11px; color: #64748B;">All systems operational</div>
+        <div style="font-size: 11px; color: #64748B;">All Graph & Vector indices active</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -410,7 +453,7 @@ st.markdown(f"""
 <div class="welcome-card">
     <div>
         <div class="welcome-title">HyRAG Console</div>
-        <div class="welcome-subtitle">Hallucination-Aware Enterprise Knowledge Assistant</div>
+        <div class="welcome-subtitle">Hallucination-Aware Hybrid Graph Retrieval Assistant</div>
     </div>
     <div>
         {logo_html}
@@ -433,7 +476,7 @@ col_input, col_btn = st.columns([5, 1])
 with col_input:
     query_input = st.text_input(
         "Search Prompt",
-        placeholder="What do you want to know?",
+        placeholder="Ask questions about policies, frameworks, architectures, or multi-hop dependencies...",
         label_visibility="collapsed"
     )
 
@@ -445,11 +488,11 @@ with col_btn:
 col_c1, col_c2, col_c3 = st.columns(3)
 
 sample_query = ""
-if col_c1.button("🛡️ AWS IAM MFA best practices", use_container_width=True):
+if col_c1.button("🛡️ AWS IAM & MFA Policy", use_container_width=True):
     sample_query = "What is the AWS policy on multi-factor authentication (MFA) for root accounts?"
-if col_c2.button("📊 AWS Well-Architected Framework", use_container_width=True):
-    sample_query = "What are the core pillars of AWS Well-Architected Framework security?"
-if col_c3.button("🎁 Amazon Gift Card policy", use_container_width=True):
+if col_c2.button("📊 AWS Well-Architected Security", use_container_width=True):
+    sample_query = "What are the core pillars and security principles of AWS Well-Architected Framework?"
+if col_c3.button("🎁 Amazon Gift & Conflict Policy", use_container_width=True):
     sample_query = "What is Amazon's policy regarding workplace gifts and conflict of interest?"
 
 if sample_query:
@@ -460,17 +503,40 @@ if sample_query:
 if (ask_button or sample_query) and query_input.strip():
     start_time = time.time()
 
-    with st.spinner("Executing Retrieval Pipeline..."):
-        dense_results = search_faiss_index(query_input, model, faiss_index, chunks, top_k=10)
-        sparse_results = search_bm25(query_input, bm25, chunks, top_k=10)
-        hybrid_chunks = reciprocal_rank_fusion(dense_results, sparse_results, k=rrf_k_const, top_k=top_k_chunks)
+    with st.spinner("Executing Tri-Hybrid Retrieval (Vector + BM25 + Graph)..."):
+        hybrid_chunks, graph_res = tri_hybrid_search(
+            query=query_input,
+            model=model,
+            faiss_index=faiss_index,
+            bm25_index=bm25,
+            chunks=chunks,
+            graph_store=graph_store,
+            top_k_chunks=top_k_chunks,
+            rrf_k=rrf_k_const,
+            max_hops=max_hops,
+            min_relation_confidence=min_confidence
+        )
+
+    with st.spinner("Analyzing Multi-Document Conflicts & Grounding..."):
+        conflicts = detect_graph_conflicts(graph_res.get("subgraph", {}).get("edges", []))
+        conflict_notice = format_conflict_prompt_notice(conflicts)
 
     with st.spinner("Generating LLM Response..."):
-        prompt = build_grounded_prompt(query_input, hybrid_chunks)
+        prompt = build_grounded_prompt(
+            query=query_input,
+            retrieved_chunks=hybrid_chunks,
+            graph_facts=graph_res.get("facts_summary", ""),
+            conflict_notice=conflict_notice
+        )
         answer = generate_llm_answer(prompt)
 
-    with st.spinner("Auditing Grounding..."):
-        audit = audit_hallucination_and_confidence(answer, hybrid_chunks, model)
+    with st.spinner("Auditing 4-Layer Hallucination Grounding..."):
+        audit = audit_hallucination_and_confidence(
+            answer=answer,
+            retrieved_chunks=hybrid_chunks,
+            embedding_model=model,
+            graph_facts=graph_res.get("facts_summary", "")
+        )
 
     elapsed_time = round(time.time() - start_time, 2)
 
@@ -484,7 +550,7 @@ if (ask_button or sample_query) and query_input.strip():
         <div class="kpi-box">
             <div class="kpi-header">🛡️ Confidence Score</div>
             <div class="kpi-number">{audit['confidence_score']}</div>
-            <div class="kpi-subtext-green">High Confidence</div>
+            <div class="kpi-subtext-green">Tri-Hybrid Grounded</div>
             <div class="progress-bar-green"></div>
         </div>
         """, unsafe_allow_html=True)
@@ -494,7 +560,7 @@ if (ask_button or sample_query) and query_input.strip():
         <div class="kpi-box">
             <div class="kpi-header">🛡️ Hallucination Risk</div>
             <div class="kpi-number">{audit['hallucination_risk']}</div>
-            <div class="kpi-subtext-green">Grounded</div>
+            <div class="kpi-subtext-green">Verified Grounding</div>
             <div class="progress-bar-green"></div>
         </div>
         """, unsafe_allow_html=True)
@@ -502,9 +568,9 @@ if (ask_button or sample_query) and query_input.strip():
     with k3:
         st.markdown(f"""
         <div class="kpi-box">
-            <div class="kpi-header">🎯 Semantic Alignment</div>
-            <div class="kpi-number">{int(audit['semantic_similarity']*100)}%</div>
-            <div class="kpi-subtext-blue">Good Alignment</div>
+            <div class="kpi-header">🕸️ Graph Grounding</div>
+            <div class="kpi-number">{int(audit.get('graph_grounding_score', 1.0)*100)}%</div>
+            <div class="kpi-subtext-blue">Relational Facts Validated</div>
             <div class="progress-bar-blue"></div>
         </div>
         """, unsafe_allow_html=True)
@@ -514,10 +580,14 @@ if (ask_button or sample_query) and query_input.strip():
         <div class="kpi-box">
             <div class="kpi-header">🕒 Response Time</div>
             <div class="kpi-number">{elapsed_time}s</div>
-            <div class="kpi-subtext-gray">Total Time</div>
-            <div style="height: 3px;"></div>
+            <div class="kpi-subtext-gray">Total Execution</div>
+            <div class="progress-bar-orange"></div>
         </div>
         """, unsafe_allow_html=True)
+
+    # --- CONFLICT NOTICE ALERT (IF CONFLICTS DETECTED) ---
+    if conflicts:
+        st.warning(f"⚠️ **Multi-Document Conflict Detected**: {conflicts[0]['warning']}")
 
     # --- VERIFIED ANSWER CARD ---
     st.markdown("""
@@ -531,6 +601,18 @@ if (ask_button or sample_query) and query_input.strip():
         {answer}
     </div>
     """, unsafe_allow_html=True)
+
+    # --- GRAPH EVIDENCE PANEL ---
+    subgraph_paths = graph_res.get("subgraph", {}).get("paths", [])
+    if subgraph_paths:
+        st.markdown("<h4 style='font-weight: 800; color: #232F3E; margin-top: 18px; font-size: 18px;'>🕸️ Knowledge Graph Evidence & Subgraph Paths</h4>", unsafe_allow_html=True)
+        paths_html = "".join([f'<div class="graph-path-item">• {p}</div>' for p in subgraph_paths])
+        st.markdown(f"""
+        <div class="graph-evidence-card">
+            <div style="font-weight: 700; color: #146EB4; font-size: 13px; margin-bottom: 6px;">TRAVERSED GRAPH PATHS (Multi-Hop Provenance)</div>
+            {paths_html}
+        </div>
+        """, unsafe_allow_html=True)
 
     # --- SOURCES REFERENCED ---
     st.markdown("<h4 style='font-weight: 800; color: #232F3E; margin-top: 18px; font-size: 18px;'>📄 Sources Referenced</h4>", unsafe_allow_html=True)
@@ -561,21 +643,30 @@ if (ask_button or sample_query) and query_input.strip():
 
     # --- EXPANDABLE PANELS ---
     st.markdown("---")
-    with st.expander("🌿 Retrieval Details (FAISS, BM25, RRF)"):
+    with st.expander("🌿 Tri-Hybrid Retrieval Details (Dense FAISS + Sparse BM25 + Graph RAG)"):
         for idx, chunk in enumerate(hybrid_chunks):
-            d_rank = f"#{chunk['dense_rank']}" if chunk['dense_rank'] else "N/A"
-            s_rank = f"#{chunk['sparse_rank']}" if chunk['sparse_rank'] else "N/A"
-            st.write(f"**Rank #{idx+1}**: RRF Score: `{chunk['rrf_score']:.6f}` | FAISS Rank: `{d_rank}` | BM25 Rank: `{s_rank}`")
+            d_rank = f"#{chunk['dense_rank']}" if chunk.get('dense_rank') else "N/A"
+            s_rank = f"#{chunk['sparse_rank']}" if chunk.get('sparse_rank') else "N/A"
+            g_rank = f"#{chunk['graph_rank']}" if chunk.get('graph_rank') else "N/A"
+            st.write(f"**Rank #{idx+1}**: RRF Score: `{chunk['rrf_score']:.6f}` | FAISS Rank: `{d_rank}` | BM25 Rank: `{s_rank}` | Graph Rank: `{g_rank}`")
 
-    with st.expander("📄 Retrieved Chunks"):
+    with st.expander("📄 Retrieved Chunks (Candidate Pool)"):
         for idx, chunk in enumerate(hybrid_chunks):
-            st.write(f"**Chunk #{idx+1}**: {chunk['metadata']['file_name']} (Page {chunk['metadata']['page_number']})")
+            is_graph = " [🕸️ Graph Linked]" if chunk.get("is_graph_provenance") else ""
+            st.write(f"**Chunk #{idx+1}**: {chunk['metadata']['file_name']} (Page {chunk['metadata']['page_number']}){is_graph}")
             st.info(chunk['text'])
 
-    with st.expander("🛡️ Hallucination Analysis (3-Layer Audit)"):
+    with st.expander("🛡️ Hallucination Analysis (4-Layer Audit)"):
         st.write(f"• **Layer 1 (N-Gram Grounding Overlap)**: `{audit['grounding_score']*100:.1f}%`")
         st.write(f"• **Layer 2 (Semantic Vector Cosine Similarity)**: `{audit['semantic_similarity']*100:.1f}%`")
-        st.write(f"• **Layer 3 (RRF Search Verification)**: Validated")
+        st.write(f"• **Layer 3 (Graph Fact Relational Alignment)**: `{audit['graph_grounding_score']*100:.1f}%`")
+        st.write(f"• **Layer 4 (Tri-Hybrid RRF Verification)**: Validated")
 
-    with st.expander("⚙️ Debug & Metadata"):
-        st.json({"query": query_input, "audit": audit, "retrieved_count": len(hybrid_chunks)})
+    with st.expander("⚙️ Debug & Subgraph Metadata"):
+        st.json({
+            "query": query_input,
+            "seed_entities": [e.get("name") for e in graph_res.get("seed_entities", [])],
+            "subgraph_nodes_count": len(graph_res.get("subgraph", {}).get("nodes", [])),
+            "subgraph_edges_count": len(graph_res.get("subgraph", {}).get("edges", [])),
+            "audit": audit
+        })

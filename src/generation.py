@@ -1,28 +1,39 @@
 """
-generation.py - Answer Generation, Hallucination Verification & Confidence Engine for HyRAG.
+generation.py - Answer Generation, Grounding Verification & Hallucination Audit for HyRAG.
 
-This module formats hybrid retrieval contexts, calls free LLM APIs (Gemini/Groq),
-runs a 3-layer hallucination audit, and calculates verified confidence scores.
+This module formats tri-hybrid retrieval contexts (chunks + knowledge graph facts),
+calls LLM APIs (Gemini/Groq), runs a 4-layer hallucination audit, and calculates
+verified confidence scores.
 """
 
 import os
 import json
 import re
-from typing import List, Dict, Any, Tuple
+import logging
+from typing import List, Dict, Any, Tuple, Optional
 from dotenv import load_dotenv
 import numpy as np
 
 # Load environment variables from .env
 load_dotenv()
+logger = logging.getLogger("HyRAG.Generation")
 
 
-def build_grounded_prompt(query: str, retrieved_chunks: List[Dict[str, Any]]) -> str:
+def build_grounded_prompt(
+    query: str, 
+    retrieved_chunks: List[Dict[str, Any]],
+    graph_facts: Optional[str] = None,
+    conflict_notice: Optional[str] = None
+) -> str:
     """
-    Constructs a strictly retrieval-grounded system prompt.
+    Constructs a strictly retrieval-grounded system prompt combining
+    document text chunks and validated knowledge graph relational facts.
 
     Args:
         query (str): User question.
-        retrieved_chunks (List[Dict[str, Any]]): Top-K hybrid chunks from Phase 7.
+        retrieved_chunks (List[Dict[str, Any]]): Top-K hybrid chunks.
+        graph_facts (Optional[str]): Formatted knowledge graph relational facts.
+        conflict_notice (Optional[str]): Contradiction/conflict warnings if detected.
 
     Returns:
         str: Fully formatted prompt ready for LLM inference.
@@ -36,18 +47,25 @@ def build_grounded_prompt(query: str, retrieved_chunks: List[Dict[str, Any]]) ->
         context_str += f"\n[Document #{idx+1} | Source: {file_name}, Page {page_num}]\n"
         context_str += f"{chunk_text}\n"
 
-    prompt = f"""You are an enterprise AI assistant powered by HyRAG.
-Answer the user's question STRICTLY using ONLY the provided document context below.
+    graph_section = ""
+    if graph_facts and graph_facts.strip() and "No direct relational facts" not in graph_facts:
+        graph_section = f"\nVERIFIED KNOWLEDGE GRAPH FACTS:\n{graph_facts.strip()}\n"
+
+    conflict_section = f"\n{conflict_notice.strip()}\n" if conflict_notice and conflict_notice.strip() else ""
+
+    prompt = f"""You are an enterprise AI assistant powered by HyRAG (Hybrid Graph RAG).
+Answer the user's question STRICTLY using ONLY the provided verified facts and document context below.
 
 STRICT INSTRUCTIONS:
-1. Base your answer ONLY on the facts explicitly mentioned in the CONTEXT.
+1. Base your answer ONLY on the facts explicitly mentioned in the CONTEXT and VERIFIED KNOWLEDGE GRAPH FACTS.
 2. Do NOT use outside knowledge, prior assumptions, or extrapolate beyond the text.
-3. If the CONTEXT does not contain sufficient information to answer the question, state:
+3. If CONFLICTING FACTS are detected, you MUST explicitly state the discrepancy and cite both sources.
+4. If the CONTEXT does not contain sufficient information to answer the question, state:
    "I cannot answer this question based on the provided enterprise documentation."
-4. Include inline citations for facts using the format [Source: filename.pdf, Page X].
-5. Keep your response concise, factual, and professional.
-
-CONTEXT:
+5. Include inline citations for every factual claim using the format [Source: filename.pdf, Page X].
+6. Keep your response concise, factual, structured, and professional.
+{graph_section}{conflict_section}
+DOCUMENT CONTEXT:
 {context_str}
 
 USER QUESTION: {query}
@@ -79,9 +97,10 @@ def generate_llm_answer(prompt: str) -> str:
                 model="gemini-1.5-flash",
                 contents=prompt,
             )
-            return response.text.strip()
+            if response and response.text:
+                return response.text.strip()
         except Exception as e:
-            print(f"⚠️ Gemini API attempt failed ({e}). Trying Groq fallback...")
+            logger.warning(f"Gemini API attempt failed ({e}). Trying Groq fallback...")
 
     # 2. Try Groq API Fallback
     if groq_key and groq_key != "your_groq_api_key_here":
@@ -95,7 +114,7 @@ def generate_llm_answer(prompt: str) -> str:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"⚠️ Groq API attempt failed: {e}")
+            logger.warning(f"Groq API attempt failed: {e}")
 
     # Fallback if no valid API key is present
     return "⚠️ Please set a valid GEMINI_API_KEY or GROQ_API_KEY in your .env file to enable live LLM generation."
@@ -104,50 +123,74 @@ def generate_llm_answer(prompt: str) -> str:
 def audit_hallucination_and_confidence(
     answer: str, 
     retrieved_chunks: List[Dict[str, Any]], 
-    embedding_model: Any
+    embedding_model: Any,
+    graph_facts: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Runs a 3-layer Hallucination Audit & Confidence Calculation on the generated answer.
+    Runs a 4-layer Hallucination Audit & Confidence Calculation on the generated answer.
 
-    Layer 1: Rule-Based N-Gram Grounding Score
-    Layer 2: Semantic Embedding Cosine Similarity (Answer vs. Combined Context)
-    Layer 3: Confidence Score Calculation
+    Layer 1: Rule-Based N-Gram Word Overlap Grounding
+    Layer 2: Semantic Embedding Cosine Similarity (Answer vs. Evidence)
+    Layer 3: Graph Relational Fact Grounding Check
+    Layer 4: Composite Tri-Hybrid Confidence Score
 
     Returns:
         Dict[str, Any]: Detailed audit report with confidence score percentage.
     """
     if "cannot answer" in answer.lower() or "please set a valid" in answer.lower():
         return {
-            "confidence_score": 0.0,
+            "confidence_score": "0.0%",
             "grounding_score": 0.0,
             "semantic_similarity": 0.0,
+            "graph_grounding_score": 0.0,
             "hallucination_risk": "HIGH / UNANSWERED",
             "is_grounded": False
         }
 
-    combined_context = " ".join([c["text"] for c in retrieved_chunks]).lower()
+    chunks_text = " ".join([c["text"] for c in retrieved_chunks]).lower()
+    combined_evidence = f"{chunks_text} {graph_facts.lower() if graph_facts else ''}"
+    
     answer_words = re.findall(r'\w+', answer.lower())
     
     # Exclude common stop words
-    stop_words = {"the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "with", "is", "are", "was", "were", "this", "that", "it"}
+    stop_words = {"the", "a", "an", "and", "or", "in", "on", "at", "to", "for", "of", "with", "is", "are", "was", "were", "this", "that", "it", "as", "by"}
     content_words = [w for w in answer_words if w not in stop_words and len(w) > 2]
     
+    # Layer 1: N-Gram Grounding Overlap
     if not content_words:
         grounding_score = 1.0
     else:
-        matched_words = [w for w in content_words if w in combined_context]
+        matched_words = [w for w in content_words if w in combined_evidence]
         grounding_score = len(matched_words) / len(content_words)
 
     # Layer 2: Semantic Embedding Cosine Similarity
     answer_vector = embedding_model.encode([answer], normalize_embeddings=True, convert_to_numpy=True)
-    context_vector = embedding_model.encode([combined_context[:2000]], normalize_embeddings=True, convert_to_numpy=True)
+    context_vector = embedding_model.encode([combined_evidence[:2500]], normalize_embeddings=True, convert_to_numpy=True)
     semantic_sim = float(np.dot(answer_vector[0], context_vector[0]))
 
-    # Layer 3: Fusion Confidence Score Calculation
+    # Layer 3: Graph Relational Grounding Check
+    graph_grounding_score = 1.0
+    if graph_facts and "•" in graph_facts:
+        fact_lines = [line.strip() for line in graph_facts.split("\n") if line.strip().startswith("•")]
+        if fact_lines:
+            matched_facts = 0
+            for fact in fact_lines:
+                # Extract key entities from path string
+                entities = re.findall(r'\((.*?)\)', fact)
+                if any(e.lower() in answer.lower() for e in entities if len(e) > 2):
+                    matched_facts += 1
+            graph_grounding_score = matched_facts / len(fact_lines) if fact_lines else 1.0
+
+    # Layer 4: Composite Confidence Score Calculation
     top_rrf = retrieved_chunks[0].get("rrf_score", 0.01) if retrieved_chunks else 0.0
     rrf_strength = min(top_rrf / 0.033, 1.0)  # Normalize top RRF score against max theoretical ~0.033
 
-    final_confidence = (0.4 * rrf_strength) + (0.3 * grounding_score) + (0.3 * max(semantic_sim, 0.0))
+    final_confidence = (
+        (0.35 * rrf_strength) + 
+        (0.25 * grounding_score) + 
+        (0.20 * max(semantic_sim, 0.0)) + 
+        (0.20 * graph_grounding_score)
+    )
     confidence_pct = round(final_confidence * 100, 1)
 
     risk_level = "LOW" if confidence_pct >= 70.0 else ("MEDIUM" if confidence_pct >= 45.0 else "HIGH")
@@ -156,54 +199,7 @@ def audit_hallucination_and_confidence(
         "confidence_score": f"{confidence_pct}%",
         "grounding_score": round(grounding_score, 4),
         "semantic_similarity": round(semantic_sim, 4),
+        "graph_grounding_score": round(graph_grounding_score, 4),
         "hallucination_risk": risk_level,
         "is_grounded": confidence_pct >= 60.0
     }
-
-
-if __name__ == "__main__":
-    from src.embeddings import load_embedding_model
-    from src.retrieval import build_bm25_index, search_bm25, reciprocal_rank_fusion
-    import faiss
-
-    # End-to-End Pipeline Test!
-    storage_dir = os.path.join("storage", "faiss_index")
-    index_path = os.path.join(storage_dir, "index.faiss")
-    metadata_path = os.path.join(storage_dir, "chunks_metadata.json")
-
-    try:
-        print("--- PHASE 8 END-TO-END HyRAG PIPELINE TEST ---")
-        faiss_index = faiss.read_index(index_path)
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            chunks = json.load(f)
-
-        model = load_embedding_model()
-        bm25, _ = build_bm25_index(chunks)
-
-        # Test Query
-        query = "What is Amazon's policy regarding workplace gifts and conflict of interest?"
-        print(f"\n❓ USER QUERY: '{query}'")
-
-        # 1. Retrieval (FAISS + BM25 + RRF)
-        from src.embeddings import search_faiss_index
-        dense_res = search_faiss_index(query, model, faiss_index, chunks, top_k=5)
-        sparse_res = search_bm25(query, bm25, chunks, top_k=5)
-        hybrid_chunks = reciprocal_rank_fusion(dense_res, sparse_res, k=60, top_k=3)
-
-        # 2. Build Grounded Prompt
-        prompt = build_grounded_prompt(query, hybrid_chunks)
-
-        # 3. Generate LLM Answer
-        answer = generate_llm_answer(prompt)
-        print(f"\n🤖 GENERATED ANSWER:\n{answer}")
-
-        # 4. Run Hallucination & Confidence Audit
-        audit = audit_hallucination_and_confidence(answer, hybrid_chunks, model)
-        print(f"\n🛡️ HALLUCINATION & CONFIDENCE AUDIT:")
-        print(f"   • Confidence Score: {audit['confidence_score']}")
-        print(f"   • Grounding Score: {audit['grounding_score']}")
-        print(f"   • Semantic Similarity: {audit['semantic_similarity']}")
-        print(f"   • Hallucination Risk: {audit['hallucination_risk']}")
-
-    except Exception as e:
-        print(f"❌ Error during Phase 8 test: {e}")

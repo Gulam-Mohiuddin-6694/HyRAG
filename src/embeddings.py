@@ -7,13 +7,19 @@ and provides semantic search capabilities.
 """
 
 import os
+import sys
 import json
+import logging
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
+# Ensure safe console output
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+logger = logging.getLogger("HyRAG.Embeddings")
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 
@@ -27,9 +33,9 @@ def load_embedding_model(model_name: str = MODEL_NAME) -> SentenceTransformer:
     Returns:
         SentenceTransformer: Loaded model instance.
     """
-    print(f"🔄 Loading embedding model '{model_name}'...")
+    print(f"[HyRAG] Loading embedding model '{model_name}'...")
     model = SentenceTransformer(model_name)
-    print(f"✅ Embedding model loaded! (Vector Dimensions: {model.get_embedding_dimension()})")
+    print(f"[HyRAG] Embedding model loaded! (Vector Dimensions: {model.get_embedding_dimension()})")
     return model
 
 
@@ -53,19 +59,19 @@ def generate_chunk_embeddings(
         raise ValueError("Cannot generate embeddings for an empty list of chunks.")
 
     texts = [c["text"] for c in chunks]
-    print(f"⚡ Generating embeddings for {len(texts)} chunk(s) (batch_size={batch_size})...")
+    print(f"[HyRAG] Generating embeddings for {len(texts)} chunk(s) (batch_size={batch_size})...")
 
     # Generate L2-normalized embeddings for cosine similarity matching
     embeddings = model.encode(
         texts,
         batch_size=batch_size,
-        show_progress_bar=True,
+        show_progress_bar=False,
         normalize_embeddings=True,
         convert_to_numpy=True
     )
 
     embeddings = embeddings.astype("float32")
-    print(f"✅ Embeddings matrix generated! Shape: {embeddings.shape}")
+    print(f"[HyRAG] Embeddings matrix generated! Shape: {embeddings.shape}")
     return embeddings
 
 
@@ -80,12 +86,12 @@ def build_faiss_index(embeddings: np.ndarray) -> faiss.IndexFlatIP:
         faiss.IndexFlatIP: Initialized and populated FAISS index.
     """
     dim = embeddings.shape[1]
-    print(f"🏗️  Building FAISS IndexFlatIP (Dimension: {dim})...")
+    print(f"[HyRAG] Building FAISS IndexFlatIP (Dimension: {dim})...")
     
     index = faiss.IndexFlatIP(dim)
     index.add(embeddings)
 
-    print(f"✅ FAISS Index Built! Total vectors stored: {index.ntotal}")
+    print(f"[HyRAG] FAISS Index Built! Total vectors stored: {index.ntotal}")
     return index
 
 
@@ -114,8 +120,8 @@ def save_faiss_index(
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(chunks, f, indent=2, ensure_ascii=False)
 
-    print(f"💾 FAISS Index successfully saved to '{index_path}'")
-    print(f"💾 Chunks Metadata successfully saved to '{metadata_path}'")
+    print(f"[HyRAG] FAISS Index successfully saved to '{index_path}'")
+    print(f"[HyRAG] Chunks Metadata successfully saved to '{metadata_path}'")
 
 
 def search_faiss_index(
@@ -149,42 +155,3 @@ def search_faiss_index(
             results.append(matched_chunk)
 
     return results
-
-
-if __name__ == "__main__":
-    from src.ingestion import ingest_directory
-    from src.chunking import chunk_dataset
-
-    raw_docs_dir = os.path.join("data", "raw_documents")
-    
-    try:
-        print("--- PHASE 4: INGESTION ---")
-        pages = ingest_directory(raw_docs_dir)
-
-        print("\n--- PHASE 5: TOKEN CHUNKING ---")
-        chunks = chunk_dataset(pages)
-
-        print("\n--- PHASE 6: EMBEDDINGS & FULL FAISS INDEX BUILD ---")
-        model = load_embedding_model()
-
-        # Step 8: Full Dataset Processing (3,501 chunks)
-        full_embeddings = generate_chunk_embeddings(chunks, model, batch_size=64)
-        faiss_index = build_faiss_index(full_embeddings)
-        
-        # Save FAISS Index & Metadata locally
-        save_faiss_index(faiss_index, chunks)
-
-        # Step 9 Verification: Run a live semantic search test query!
-        test_query = "What is Amazon's policy on workplace gifts and entertainment?"
-        print(f"\n🔍 Live Semantic Search Test Query: '{test_query}'")
-        search_results = search_faiss_index(test_query, model, faiss_index, chunks, top_k=2)
-
-        print(f"\n🎯 Top {len(search_results)} Search Results:")
-        for idx, res in enumerate(search_results):
-            print(f"\n--- Result #{idx+1} (Similarity Score: {res['similarity_score']:.4f}) ---")
-            print(f"📄 Source: {res['metadata']['file_name']} (Page {res['metadata']['page_number']})")
-            print(f"📌 Chunk ID: {res['chunk_id']}")
-            print(f"📝 Text Snippet: {res['text'][:250]}...")
-
-    except Exception as e:
-        print(f"❌ Error during full embedding pipeline execution: {e}")
